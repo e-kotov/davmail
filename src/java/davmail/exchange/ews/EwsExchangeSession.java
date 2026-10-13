@@ -1087,6 +1087,12 @@ public class EwsExchangeSession extends ExchangeSession {
         }
         List<ExchangeSession.Folder> folders = new ArrayList<>();
         appendSubFolders(folders, baseFolderPath, getFolderId(folderPath), condition, recursive);
+        String lowerCaseFolderPath = folderPath.toLowerCase();
+        if (CALENDAR.equals(baseFolderPath) && lowerCaseFolderPath.startsWith(currentMailboxPath + '/')) {
+            for (Map.Entry<String, String> alias : getFolderAliases().entrySet()) {
+                folders.add(internalGetFolder(new FolderId("t:FolderId", alias.getValue(), null), CALENDAR + '/' + alias.getKey()));
+            }
+        }
         return folders;
     }
 
@@ -2913,7 +2919,8 @@ public class EwsExchangeSession extends ExchangeSession {
 
     @Override
     public boolean isSharedFolder(String folderPath) {
-        return folderPath.startsWith("/") && !folderPath.toLowerCase().startsWith(currentMailboxPath);
+        return folderPath.startsWith("/") && (!folderPath.toLowerCase().startsWith(currentMailboxPath)
+                || getFolderAliasId(folderPath.substring(Math.min(folderPath.length(), currentMailboxPath.length() + 1))) != null);
     }
 
     @Override
@@ -3073,7 +3080,46 @@ public class EwsExchangeSession extends ExchangeSession {
         }
     }
 
+    /**
+     * Folders addressed by known EWS id, for shared folders whose parent is not visible.
+     * davmail.folderAliases=name=EwsFolderId;name2=EwsFolderId2, exposed as calendar/name in the own mailbox.
+     */
+    protected static Map<String, String> getFolderAliases() {
+        Map<String, String> aliases = new LinkedHashMap<>();
+        String value = Settings.getProperty("davmail.folderAliases");
+        if (value != null) {
+            for (String entry : value.split(";")) {
+                int index = entry.indexOf('=');
+                if (index > 0) {
+                    aliases.put(entry.substring(0, index).trim(), entry.substring(index + 1).trim());
+                }
+            }
+        }
+        return aliases;
+    }
+
+    /**
+     * EWS folder id for calendar/name, with or without trailing item path, relative to the own mailbox.
+     */
+    protected static String getFolderAliasId(String folderPath) {
+        if (!folderPath.startsWith(CALENDAR + '/')) {
+            return null;
+        }
+        String aliasName = folderPath.substring(CALENDAR.length() + 1);
+        int slashIndex = aliasName.indexOf('/');
+        if (slashIndex >= 0) {
+            aliasName = aliasName.substring(0, slashIndex);
+        }
+        return getFolderAliases().get(aliasName);
+    }
+
     protected FolderId getSubFolderIdIfExists(String mailbox, String folderPath) throws IOException {
+        if (mailbox == null) {
+            String aliasId = getFolderAliasId(folderPath);
+            if (aliasId != null) {
+                return new FolderId("t:FolderId", aliasId, null);
+            }
+        }
         String[] folderNames;
         FolderId currentFolderId;
 
