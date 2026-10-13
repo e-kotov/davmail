@@ -1,7 +1,8 @@
 # e-kotov/davmail
 
 Personal fork of [mguessan/davmail](https://github.com/mguessan/davmail) (GPL-2.0).
-Branch `ek` is an upstream release tag plus the patches below; `master` mirrors upstream.
+Branch `ek` is upstream `master` at a tested commit, merged in, plus the patches below. `master`
+mirrors upstream. Each release's notes name the upstream commit it is built on.
 
 ## Patches
 
@@ -15,10 +16,15 @@ Branch `ek` is an upstream release tag plus the patches below; `master` mirrors 
 
 ## Releases
 
-Tags are `X.Y.Z-ek.N`, where `X.Y.Z` is the upstream release the `ek` branch is based on and `N`
-starts at 1 and never repeats. Pushing a tag runs `.github/workflows/release-ek.yml`, which
+Tags are `X.Y.Z-ek.N`, where `X.Y.Z` is the upstream version in `build.xml` at the merged commit
+and `N` starts at 1 and never repeats for that version. Pushing a tag runs `.github/workflows/release-ek.yml`, which
 builds with Ant on Java 21 and publishes `davmail-X.Y.Z-ek.N.zip` (the upstream
 platform-independent layout: `davmail`, `davmail.jar`, `lib/`) and `SHA256SUMS`.
 
-To update: rebase `ek` onto the new upstream tag, then tag `X.Y.Z-ek.1`.
+To update: test the patch on the new upstream commit, merge that commit into `ek` (no rebase, so
+older release tags stay on the branch), then tag the next `X.Y.Z-ek.N`.
+
+History: `7.0.0-ek.1` was based on the upstream `7.0.0` tag. From `7.0.0-ek.2`, `ek` follows
+upstream `master`; `7.0.0-ek.2` is on `d452b6d8`, which adds the macOS 27 Calendar fix for
+mguessan/davmail#562 (`principal-URL` on the principal).
 Upstream's Docker image workflows are removed on this branch.
