@@ -26,6 +26,7 @@ import davmail.DavGateway;
 import davmail.Settings;
 import davmail.exception.DavMailException;
 import davmail.exception.HttpForbiddenException;
+import davmail.exchange.NetworkDownException;
 import davmail.exception.HttpNotFoundException;
 import davmail.exception.InsufficientStorageException;
 import davmail.exchange.ExchangeSession;
@@ -47,6 +48,7 @@ import javax.mail.internet.MimeMultipart;
 import javax.mail.internet.MimePart;
 import javax.mail.internet.MimeUtility;
 import javax.mail.util.SharedByteArrayInputStream;
+import javax.net.ssl.SSLException;
 import java.io.ByteArrayOutputStream;
 import java.io.FilterOutputStream;
 import java.io.IOException;
@@ -56,6 +58,7 @@ import java.io.UnsupportedEncodingException;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -65,6 +68,7 @@ import java.util.Date;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Set;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -144,6 +148,10 @@ public class ImapConnection extends AbstractConnection {
                                 logConnection("LOGON", userName);
                                 sendClient(commandId + " OK Authenticated");
                                 state = State.AUTHENTICATED;
+                            } catch (NetworkDownException e) {
+                                LOGGER.warn(e.getMessage());
+                                sendClient("* BYE [NetworkDown] " + ((e.getMessage() == null) ? e.toString() : e.getMessage()).replaceAll("\\n", " "));
+                                break;
                             } catch (Exception e) {
                                 logConnection("FAILED", userName);
                                 DavGatewayTray.error(e);
@@ -171,6 +179,10 @@ public class ImapConnection extends AbstractConnection {
                                         logConnection("LOGON", userName);
                                         sendClient(commandId + " OK Authenticated");
                                         state = State.AUTHENTICATED;
+                                    } catch (NetworkDownException e) {
+                                        LOGGER.warn(e.getMessage());
+                                        sendClient("* BYE [NetworkDown] " + ((e.getMessage() == null) ? e.toString() : e.getMessage()).replaceAll("\\n", " "));
+                                        break;
                                     } catch (Exception e) {
                                         logConnection("FAILED", userName);
                                         DavGatewayTray.error(e);
@@ -339,8 +351,9 @@ public class ImapConnection extends AbstractConnection {
                                                             handleFetch(message, uidRangeIterator.currentIndex, parameters);
                                                         } catch (HttpNotFoundException e) {
                                                             LOGGER.warn("Ignore missing message " + uidRangeIterator.currentIndex);
-                                                        } catch (SocketException e) {
-                                                            // client closed connection
+                                                        } catch (SocketException | SocketTimeoutException |
+                                                                 SSLException | UnknownHostException | NetworkDownException e) {
+                                                            // client closed connection or network error
                                                             throw e;
                                                         } catch (IOException e) {
                                                             DavGatewayTray.log(e);
@@ -381,6 +394,7 @@ public class ImapConnection extends AbstractConnection {
                                                         session.copyMessages(messages, targetName);
                                                     } else {
                                                         session.moveMessages(messages, targetName);
+                                                        refreshCurrentFolder();
                                                     }
                                                     sendClient(commandId + " OK " + subcommand + " completed");
                                                 }
@@ -389,6 +403,25 @@ public class ImapConnection extends AbstractConnection {
                                             } catch (HttpResponseException e) {
                                                 sendClient(commandId + " NO " + e.getMessage());
                                             }
+                                        } else if ("expunge".equalsIgnoreCase(subcommand)) {
+                                            // RFC 4315 UID EXPUNGE: expunge only \Deleted messages within the UID set
+                                            if (currentFolder == null) {
+                                                sendClient(commandId + " NO no folder selected");
+                                            } else if (!tokens.hasMoreTokens()) {
+                                                sendClient(commandId + " BAD missing UID set parameter");
+                                            } else {
+                                                UIDRangeIterator uidRangeIterator = new UIDRangeIterator(currentFolder.messages, tokens.nextToken());
+                                                Set<Long> uidSet = new HashSet<>();
+                                                while (uidRangeIterator.hasNext()) {
+                                                    uidSet.add(uidRangeIterator.next().getImapUid());
+                                                }
+                                                if (expunge(false, uidSet)) {
+                                                    session.refreshFolder(currentFolder);
+                                                }
+                                                sendClient(commandId + " OK UID EXPUNGE completed");
+                                            }
+                                        } else {
+                                            sendClient(commandId + " BAD unsupported UID subcommand " + subcommand);
                                         }
                                     } else {
                                         sendClient(commandId + " BAD command unrecognized");
@@ -430,8 +463,8 @@ public class ImapConnection extends AbstractConnection {
                                                 handleFetch(message, rangeIterator.currentIndex, parameters);
                                             } catch (HttpNotFoundException e) {
                                                 LOGGER.warn("Ignore missing message " + rangeIterator.currentIndex);
-                                            } catch (SocketException e) {
-                                                // client closed connection, rethrow exception
+                                            } catch (SocketException | SocketTimeoutException | SSLException | UnknownHostException | NetworkDownException e) {
+                                                // client closed connection or network error, rethrow exception
                                                 throw e;
                                             } catch (IOException e) {
                                                 DavGatewayTray.log(e);
@@ -463,6 +496,9 @@ public class ImapConnection extends AbstractConnection {
                                                 } else {
                                                     session.moveMessage(message, targetName);
                                                 }
+                                            }
+                                            if ("move".equalsIgnoreCase(command)) {
+                                                refreshCurrentFolder();
                                             }
                                             sendClient(commandId + " OK " + command + " completed");
                                         }
@@ -576,16 +612,17 @@ public class ImapConnection extends AbstractConnection {
                                             while (in.available() == 0) {
                                                 if (++count >= imapIdleDelay) {
                                                     count = 0;
-                                                    TreeMap<Long, String> previousImapFlagMap = currentFolder.getImapFlagMap();
-                                                    if (session.refreshFolder(currentFolder)) {
-                                                        handleRefresh(previousImapFlagMap, currentFolder.getImapFlagMap());
-                                                    }
+                                                    refreshCurrentFolder();
                                                 }
                                                 // wait for input 1 second
                                                 try {
                                                     byte[] byteBuffer = new byte[1];
-                                                    if (in.read(byteBuffer) > 0) {
+                                                    int readResult = in.read(byteBuffer);
+                                                    if (readResult > 0) {
                                                         in.unread(byteBuffer);
+                                                    } else if (readResult == -1) {
+                                                        // client disconnected
+                                                        throw new SocketException("client closed connection");
                                                     }
                                                 } catch (SocketTimeoutException e) {
                                                     // ignore, read timed out
@@ -610,10 +647,7 @@ public class ImapConnection extends AbstractConnection {
                                 } else if ("noop".equalsIgnoreCase(command) || "check".equalsIgnoreCase(command)) {
                                     if (currentFolder != null) {
                                         DavGatewayTray.debug(new BundleMessage("LOG_IMAP_COMMAND", command, currentFolder.folderPath));
-                                        TreeMap<Long, String> previousImapFlagMap = currentFolder.getImapFlagMap();
-                                        if (session.refreshFolder(currentFolder)) {
-                                            handleRefresh(previousImapFlagMap, currentFolder.getImapFlagMap());
-                                        }
+                                        refreshCurrentFolder();
                                     }
                                     sendClient(commandId + " OK " + command + " completed");
                                 } else if ("subscribe".equalsIgnoreCase(command) || "unsubscribe".equalsIgnoreCase(command)) {
@@ -686,6 +720,13 @@ public class ImapConnection extends AbstractConnection {
             }
         } catch (SocketException e) {
             LOGGER.warn(BundleMessage.formatLog("LOG_CLIENT_CLOSED_CONNECTION"));
+        } catch (NetworkDownException | UnknownHostException | SSLException e) {
+            LOGGER.warn(e.getMessage());
+            try {
+                sendClient("* BYE [NetworkDown] " + ((e.getMessage() == null) ? e.toString() : e.getMessage()).replaceAll("\\n", " "));
+            } catch (IOException e2) {
+                DavGatewayTray.warn(new BundleMessage("LOG_EXCEPTION_SENDING_ERROR_TO_CLIENT"), e2);
+            }
         } catch (Exception e) {
             DavGatewayTray.log(e);
             try {
@@ -801,6 +842,18 @@ public class ImapConnection extends AbstractConnection {
         sendClient("* " + currentFolder.recent + " RECENT");
     }
 
+    /**
+     * Refresh current folder and send EXPUNGE/FLAG notifications.
+     *
+     * @throws IOException on error
+     */
+    private void refreshCurrentFolder() throws IOException {
+        TreeMap<Long, String> previousImapFlagMap = currentFolder.getImapFlagMap();
+        if (session.refreshFolder(currentFolder)) {
+            handleRefresh(previousImapFlagMap, currentFolder.getImapFlagMap());
+        }
+    }
+
     static private class KeepAlive {
         private final ScheduledExecutorService scheduler;
         private final ScheduledFuture<?> task;
@@ -911,7 +964,7 @@ public class ImapConnection extends AbstractConnection {
                             || parameters.equals("RFC822.SIZE RFC822.HEADER FLAGS") // icedove
                             || Settings.getBooleanProperty("davmail.imapAlwaysApproxMsgSize")) {   // Send approximate size
                         size = message.size;
-                        LOGGER.debug(String.format("Message %s sent approximate size %d bytes", message.getImapUid(), size));
+                        LOGGER.debug(String.format("Message %s in folder %s sent approximate size %d bytes", message.getImapUid(), currentFolder.folderPath, size));
                     } else {
                         size = messageWrapper.getMimeMessageSize();
                     }
@@ -974,7 +1027,7 @@ public class ImapConnection extends AbstractConnection {
                         partOutputStream = new PartOutputStream(baos, false, true, startIndex, maxSize);
                         partInputStream = messageWrapper.getRawInputStream();
                     } else if ("RFC822.HEADER".equals(param) || (partIndexString != null && partIndexString.startsWith("HEADER"))) {
-                        // Header requested fetch     headers
+                        // Header requested fetch headers
                         String[] requestedHeaders = getRequestedHeaders(partIndexString);
                         // OSX Lion special flags request
                         if (requestedHeaders != null && requestedHeaders.length == 1 && "content-class".equals(requestedHeaders[0]) && message.contentClass != null) {
@@ -1059,10 +1112,6 @@ public class ImapConnection extends AbstractConnection {
                     }
                     buffer.append(" {").append(baos.size()).append('}');
                     sendClient(buffer.toString());
-                    // log content if less than 2K
-                    if (LOGGER.isDebugEnabled() && baos.size() < 2048) {
-                        LOGGER.debug(new String(baos.toByteArray(), StandardCharsets.UTF_8));
-                    }
                     os.write(baos.toByteArray());
                     os.flush();
                     buffer.setLength(0);
@@ -1544,7 +1593,7 @@ public class ImapConnection extends AbstractConnection {
                 return session.isNull("deleted");
             } else if ("FROM".equals(nextToken) || "TO".equals(nextToken) || "CC".equals(nextToken)
                     || "SUBJECT".equals(nextToken) || "BODY".equals(nextToken) || "TEXT".equals(nextToken)
-                    || "KEYWORD".equals(nextToken) || "LARGER".equals(nextToken) || "SMALLER".equals(nextToken)) {
+                    || "KEYWORD".equals(nextToken) || "UNKEYWORD".equals(nextToken) || "LARGER".equals(nextToken) || "SMALLER".equals(nextToken)) {
                 return appendNotSearchParams(nextToken + " " + tokens.nextToken(), conditions);
             } else if ("UID".equals(nextToken)) {
                 conditions.notUidRange = tokens.nextToken();
@@ -1566,6 +1615,8 @@ public class ImapConnection extends AbstractConnection {
                     session.contains("cc", value));
         } else if ("KEYWORD".equals(token)) {
             return session.isEqualTo("keywords", session.convertFlagToKeyword(tokens.nextToken()));
+        } else if ("UNKEYWORD".equals(token)) {
+            return session.not(session.isEqualTo("keywords", session.convertFlagToKeyword(tokens.nextToken())));
         } else if ("FROM".equals(token)) {
             return session.contains("from", tokens.nextToken());
         } else if ("TO".equals(token)) {
@@ -1641,12 +1692,7 @@ public class ImapConnection extends AbstractConnection {
         } catch (ParseException e) {
             throw new DavMailException("EXCEPTION_INVALID_SEARCH_PARAMETERS", dateToken);
         }
-        String searchAttribute;
-        if (token.startsWith("SENT")) {
-            searchAttribute = "date";
-        } else {
-            searchAttribute = "lastmodified";
-        }
+        String searchAttribute = "date";
 
         if (token.endsWith("ON")) {
             return session.and(session.gt(searchAttribute, session.formatSearchDate(startDate)),
@@ -1661,11 +1707,15 @@ public class ImapConnection extends AbstractConnection {
     }
 
     protected boolean expunge(boolean silent) throws IOException {
+        return expunge(silent, null);
+    }
+
+    protected boolean expunge(boolean silent, Set<Long> uidSet) throws IOException {
         boolean hasDeleted = false;
         if (currentFolder.messages != null) {
             int index = 1;
             for (ExchangeSession.Message message : currentFolder.messages) {
-                if (message.deleted) {
+                if (message.deleted && (uidSet == null || uidSet.contains(message.getImapUid()))) {
                     message.delete();
                     hasDeleted = true;
                     if (!silent) {

@@ -35,6 +35,7 @@ import javax.mail.internet.MimeMessage;
 import javax.mail.internet.MimeMultipart;
 import javax.mail.internet.MimePart;
 import javax.mail.util.SharedByteArrayInputStream;
+import javax.net.ssl.SSLException;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
@@ -42,6 +43,7 @@ import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.io.StringReader;
 import java.net.NoRouteToHostException;
+import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -216,14 +218,15 @@ public abstract class ExchangeSession {
      * Test if the session expired.
      *
      * @return true if this session expired
-     * @throws NoRouteToHostException on error
-     * @throws UnknownHostException   on error
+     * @throws IOException on transport-level network error
      */
-    public boolean isExpired() throws NoRouteToHostException, UnknownHostException {
+    public boolean isExpired() throws IOException {
         boolean isExpired = false;
         try {
             getFolder("");
-        } catch (UnknownHostException | NoRouteToHostException exc) {
+        } catch (UnknownHostException | NoRouteToHostException |
+                 SocketTimeoutException | SSLException exc) {
+            // rethrow on network error to avoid reauthentication
             throw exc;
         } catch (IOException e) {
             isExpired = true;
@@ -2122,6 +2125,7 @@ public abstract class ExchangeSession {
         protected String contentClass;
         protected String subject;
         protected VCalendar vCalendar;
+        protected String startTimeZone;
 
         public Event(String folderPath, String itemName, String contentClass, String itemBody, String etag, String noneMatch) throws IOException {
             super(folderPath, itemName, etag, noneMatch);
@@ -2239,6 +2243,9 @@ public abstract class ExchangeSession {
                 LOGGER.debug("Vcalendar body received from server:\n" + icsBody);
             }
             vCalendar = new VCalendar(icsContent, calendarEmail, getVTimezone());
+            if (startTimeZone != null) {
+                vCalendar.setStartTimeZone(startTimeZone);
+            }
             vCalendar.fixVCalendar(fromServer);
             if (LOGGER.isDebugEnabled() && !fromServer) {
                 String resultString = vCalendar.toString();
@@ -3051,6 +3058,16 @@ public abstract class ExchangeSession {
      */
     public String getAlias() {
         return alias;
+    }
+
+    /**
+     * Check if the backend supports native people/directory search (e.g. Graph People API).
+     * When true, the LDAP layer can issue a single broad search instead of iterating A-to-Z.
+     *
+     * @return true if backend supports native people search
+     */
+    public boolean supportsPeopleSearch() {
+        return false;
     }
 
     /**

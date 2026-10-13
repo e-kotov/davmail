@@ -41,6 +41,7 @@ import java.net.UnknownHostException;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Create ExchangeSession instances.
@@ -48,8 +49,8 @@ import java.util.Map;
 public final class ExchangeSessionFactory {
     private static final Object LOCK = new Object();
     private static final Map<PoolKey, ExchangeSession> POOL_MAP = new HashMap<>();
-    private static boolean configChecked;
-    private static boolean errorSent;
+    private static volatile boolean configChecked;
+    private static volatile boolean errorSent;
 
     static class PoolKey {
         final String url;
@@ -73,7 +74,7 @@ public final class ExchangeSessionFactory {
 
         @Override
         public int hashCode() {
-            return url.hashCode() + userName.hashCode() + password.hashCode();
+            return Objects.hash(url, userName, password);
         }
     }
 
@@ -223,16 +224,22 @@ public final class ExchangeSessionFactory {
                         }
                     }
                 }
-                checkWhiteList(session.getEmail());
+                try {
+                    checkWhiteList(session.getEmail());
+                } catch (DavMailAuthenticationException e) {
+                    session.close();
+                    session = null;
+                    throw e;
+                }
                 ExchangeSession.LOGGER.debug("Created new session " + session + " for user " + poolKey.userName);
             }
             // successful login, put session in cache
             synchronized (LOCK) {
                 POOL_MAP.put(poolKey, session);
             }
-            // session opened, future failure will mean network down
+            // session opened; future failure will mean network down
             configChecked = true;
-            // Reset so next time a problem occurs message will be sent once
+            // Reset so next time a problem occurs message is sent once
             errorSent = false;
         } catch (DavMailException | IllegalStateException | NullPointerException exc) {
             throw exc;
@@ -269,7 +276,7 @@ public final class ExchangeSessionFactory {
 
     /**
      * Check if whitelist is empty or email is allowed.
-     * userWhiteList is a comma separated list of values.
+     * userWhiteList is a comma-separated list of values.
      * \@company.com means all domain users are allowed
      *
      * @param email user email
@@ -290,7 +297,7 @@ public final class ExchangeSessionFactory {
     }
 
     /**
-     * Get a non expired session.
+     * Get a non-expired session.
      * If the current session is not expired, return current session, else try to create a new session
      *
      * @param currentSession current session
@@ -330,7 +337,13 @@ public final class ExchangeSessionFactory {
      * @throws IOException if unable to access Exchange server
      */
     public static void checkConfig() throws IOException {
-        String url = Settings.getProperty("davmail.url", Settings.getO365Url());
+        String url;
+        if (Settings.isGraphEnabled()) {
+            // In Graph mode, check the Graph endpoint instead of the legacy EWS endpoint
+            url = Settings.getGraphUrl();
+        } else {
+            url = Settings.getProperty("davmail.url", Settings.getO365Url());
+        }
         if (url == null || (!url.startsWith("http://") && !url.startsWith("https://"))) {
             throw new DavMailException("LOG_INVALID_URL", url);
         }
@@ -345,9 +358,9 @@ public final class ExchangeSessionFactory {
                     && !HttpClientAdapter.isRedirect(status)) {
                 throw new DavMailException("EXCEPTION_CONNECTION_FAILED", url, status);
             }
-            // session opened, future failure will mean network down
+            // session opened; future failure will mean network down
             configChecked = true;
-            // Reset so next time a problem occurs message will be sent once
+            // Reset so next time a problem occurs message is sent once
             errorSent = false;
         } catch (Exception exc) {
             handleNetworkDown(exc);
@@ -381,21 +394,23 @@ public final class ExchangeSessionFactory {
     /**
      * Get user password from session pool for SASL authentication
      *
-     * @param userName Exchange user name
+     * @param userName Exchange username
      * @return user password
      */
     public static String getUserPassword(String userName) {
         String fullUserName = convertUserName(userName);
-        for (PoolKey poolKey : POOL_MAP.keySet()) {
-            if (poolKey.userName.equals(fullUserName)) {
-                return poolKey.password;
+        synchronized (LOCK) {
+            for (PoolKey poolKey : POOL_MAP.keySet()) {
+                if (poolKey.userName.equals(fullUserName)) {
+                    return poolKey.password;
+                }
             }
         }
         return null;
     }
 
     /**
-     * Check if at least one network interface is up and active (i.e. has an address)
+     * Check if at least one network interface is up and active (i.e., has an address)
      *
      * @return true if network available
      */
@@ -408,6 +423,9 @@ public final class ExchangeSessionFactory {
                 NetworkInterface networkInterface = enumeration.nextElement();
                 up = networkInterface.isUp() && !networkInterface.isLoopback()
                         && networkInterface.getInetAddresses().hasMoreElements();
+                if (up) {
+                    ExchangeSession.LOGGER.debug(networkInterface.getDisplayName() + " is up");
+                }
             }
         } catch (NoSuchMethodError error) {
             ExchangeSession.LOGGER.debug("Unable to test network interfaces (not available under Java 1.5)");

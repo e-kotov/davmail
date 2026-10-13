@@ -19,6 +19,7 @@
 
 package davmail.exchange.graph;
 
+import davmail.Settings;
 import davmail.exception.DavMailException;
 import davmail.exchange.VCalendar;
 import davmail.exchange.VObject;
@@ -123,6 +124,19 @@ public class GraphObject {
             }
         }
         return value;
+    }
+
+    public String getCalendarUid() {
+        String iCalUId = optString("calendaruid");
+        if (iCalUId == null && Settings.getBooleanProperty("davmail.caldavUIDFromTransactionId",false)) {
+            // restore pre 7.0.0 behavior, use transaction as UID
+            iCalUId = optString("transactionId");
+        }
+        if (iCalUId == null) {
+            // default to O365 iCalUid
+            iCalUId = optString("iCalUId");
+        }
+        return iCalUId;
     }
 
     public JSONArray optJSONArray(String key) {

@@ -258,7 +258,7 @@ public class O365Token {
 
         // resource is not relevant over OIDC
         if (!Settings.getBooleanProperty("davmail.enableOidc", Settings.isGraphEnabled())) {
-            parameters.add(new BasicNameValuePair("resource", Settings.getOutlookUrl()));
+            parameters.add(new BasicNameValuePair("resource", Settings.isGraphEnabled() ? Settings.getGraphUrl() : Settings.getOutlookUrl()));
         }
 
         RestRequest tokenRequest = new RestRequest(tokenUrl, new UrlEncodedFormEntity(parameters, Consts.UTF_8));
@@ -273,7 +273,7 @@ public class O365Token {
         } catch (UnknownHostException e) {
             // unknown host on refresh means network is down
             LOGGER.debug("refresh token failed " + e.getMessage());
-            throw new NetworkDownException("EXCEPTION_NETWORK_DOWN");
+            throw e;
         }
 
         // persist provided new refresh token

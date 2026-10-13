@@ -25,11 +25,11 @@ import davmail.Settings;
 import davmail.exception.DavMailAuthenticationException;
 import davmail.exception.DavMailException;
 import davmail.exception.HttpNotFoundException;
-import davmail.exception.HttpPreconditionFailedException;
 import davmail.exception.HttpServerErrorException;
 import davmail.exchange.ExchangeSession;
 import davmail.exchange.ExchangeSessionFactory;
 import davmail.exchange.ICSBufferedReader;
+import davmail.exchange.NetworkDownException;
 import davmail.exchange.XMLStreamUtil;
 import davmail.exchange.dav.DavExchangeSession;
 import davmail.http.URIUtil;
@@ -41,6 +41,7 @@ import org.apache.http.client.HttpResponseException;
 import org.apache.http.impl.EnglishReasonPhraseCatalog;
 import org.apache.log4j.Logger;
 
+import javax.net.ssl.SSLException;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import java.io.BufferedOutputStream;
@@ -53,9 +54,19 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.StringTokenizer;
 
 /**
  * Handle a caldav connection.
@@ -154,12 +165,20 @@ public class CaldavConnection extends AbstractConnection {
         try {
             while (!closed) {
                 line = readClient();
-                // unable to read line, connection closed ?
+                // unable to read line, connection closed?
                 if (line == null) {
                     break;
                 }
                 tokens = new StringTokenizer(line);
+                if (!tokens.hasMoreTokens()) {
+                    sendErr(HttpStatus.SC_BAD_REQUEST, "Empty request line");
+                    break;
+                }
                 String command = tokens.nextToken();
+                if (!tokens.hasMoreTokens()) {
+                    sendErr(HttpStatus.SC_BAD_REQUEST, "Missing request path");
+                    break;
+                }
                 Map<String, String> headers = parseHeaders();
                 String encodedPath = StringUtil.encodePlusSign(tokens.nextToken());
                 String path = URIUtil.decode(encodedPath);
@@ -172,7 +191,7 @@ public class CaldavConnection extends AbstractConnection {
                 } else if (!headers.containsKey("authorization")) {
                     sendUnauthorized();
                 } else {
-                    // need to check session on each request, credentials may have changed or session expired
+                    // need to check session on each request, credentials may have changed, or session expired
                     try {
                         decodeCredentials(headers.get("authorization"));
                         session = ExchangeSessionFactory.getInstance(userName, password);
@@ -203,7 +222,7 @@ public class CaldavConnection extends AbstractConnection {
             try {
                 sendErr(e);
             } catch (IOException e2) {
-                DavGatewayTray.debug(new BundleMessage("LOG_EXCEPTION_SENDING_ERROR_TO_CLIENT"), e2);
+                DavGatewayTray.debug(new BundleMessage("LOG_EXCEPTION_SENDING_ERROR_TO_CLIENT"));
             }
         } finally {
             close();
@@ -224,6 +243,8 @@ public class CaldavConnection extends AbstractConnection {
         CaldavRequest request = new CaldavRequest(command, path, headers, body);
         if (request.isOptions()) {
             sendOptions();
+        } else if (request.isHead() && request.isRoot()) {
+            sendChunkedHttpResponse(HttpStatus.SC_OK, null);
         } else if (request.isPropFind() && request.isRoot()) {
             sendRoot(request);
         } else if (request.isGet() && request.isRoot()) {
@@ -492,6 +513,21 @@ public class CaldavConnection extends AbstractConnection {
      * @throws IOException on error
      */
     public void appendFolderOrItem(CaldavResponse response, CaldavRequest request, ExchangeSession.Folder folder, String subFolder) throws IOException {
+        appendFolderOrItem(response, request, folder, subFolder, false);
+    }
+
+    /**
+     * Append folder object to Caldav response.
+     *
+     * @param response Caldav response
+     * @param request Caldav request
+     * @param folder folder object
+     * @param subFolder calendar folder path relative to request path
+     * @param nestedCalendar folder is listed as a child of another calendar
+     * @throws IOException on error
+     */
+    public void appendFolderOrItem(CaldavResponse response, CaldavRequest request, ExchangeSession.Folder folder, String subFolder,
+                                   boolean nestedCalendar) throws IOException {
         response.startResponse(encodePath(request, request.getPath(subFolder)));
         response.startPropstat();
 
@@ -514,7 +550,10 @@ public class CaldavConnection extends AbstractConnection {
             }
         }
         if (request.hasProperty("getcontenttype")) {
-            if (folder.isContact()) {
+            if (nestedCalendar) {
+                // clients listing calendar items must not mistake a sub calendar for an event
+                response.appendProperty("D:getcontenttype", "httpd/unix-directory");
+            } else if (folder.isContact()) {
                 response.appendProperty("D:getcontenttype", "text/x-vcard");
             } else if (folder.isCalendar()) {
                 response.appendProperty("D:getcontenttype", "text/calendar; component=vevent");
@@ -643,8 +682,8 @@ public class CaldavConnection extends AbstractConnection {
      */
     public void sendGetRoot() throws IOException {
         String buffer = "Connected to DavMail" + DavGateway.getCurrentVersion() + "<br/>" +
-                "UserName: " + userName + "<br/>" +
-                "Email: " + session.getEmail() + "<br/>";
+                "UserName: " + StringUtil.xmlEncode(userName) + "<br/>" +
+                "Email: " + StringUtil.xmlEncode(session.getEmail()) + "<br/>";
         sendHttpResponse(HttpStatus.SC_OK, null, "text/html;charset=UTF-8", buffer, true);
     }
 
@@ -724,7 +763,7 @@ public class CaldavConnection extends AbstractConnection {
                 // Send sub folders for multi-calendar support under iCal, except for public folders
                 if (folderList != null) {
                     for (ExchangeSession.Folder subFolder : folderList) {
-                        appendFolderOrItem(response, request, subFolder, subFolder.folderPath.substring(subFolder.folderPath.indexOf('/') + 1));
+                        appendFolderOrItem(response, request, subFolder, subFolder.folderPath.substring(subFolder.folderPath.indexOf('/') + 1), true);
                     }
                 }
             }
@@ -817,8 +856,9 @@ public class CaldavConnection extends AbstractConnection {
                         }
                         appendItemResponse(response, request, item);
                     }
-                } catch (SocketException e) {
-                    // rethrow SocketException (client closed connection)
+                } catch (SocketException | SocketTimeoutException |
+                         SSLException | UnknownHostException | NetworkDownException e) {
+                    // rethrow on client closed connection or network error
                     throw e;
                 } catch (Exception e) {
                     wireLogger.debug(e.getMessage(), e);
@@ -871,6 +911,9 @@ public class CaldavConnection extends AbstractConnection {
         if (request.hasProperty("current-user-principal")) {
             response.appendHrefProperty("D:current-user-principal", encodePath(request, "/principals/users/" + session.getEmail()));
         }
+        if (request.hasProperty("principal-URL")) {
+            response.appendHrefProperty("D:principal-URL", encodePath(request, "/principals/users/" + session.getEmail()));
+        }
         response.endPropStatOK();
         response.endResponse();
         response.endMultistatus();
@@ -901,13 +944,13 @@ public class CaldavConnection extends AbstractConnection {
                     IOUtil.encodeBase64AsString(rootFolder.ctag));
         }
         response.endPropStatOK();
+        response.endResponse();
         if (request.getDepth() == 1) {
             appendInbox(response, request, "inbox");
             appendOutbox(response, request, "outbox");
             appendFolderOrItem(response, request, session.getFolder(request.getFolderPath("calendar")), "calendar");
             appendFolderOrItem(response, request, session.getFolder(request.getFolderPath("contacts")), "contacts");
         }
-        response.endResponse();
         response.endMultistatus();
         response.close();
     }
@@ -935,6 +978,9 @@ public class CaldavConnection extends AbstractConnection {
         }
         if (request.hasProperty("current-user-principal")) {
             response.appendHrefProperty("D:current-user-principal", encodePath(request, "/principals/users/" + session.getEmail()));
+        }
+        if (request.hasProperty("principal-URL")) {
+            response.appendHrefProperty("D:principal-URL", encodePath(request, "/principals/users/" + session.getEmail()));
         }
         response.endPropStatOK();
         response.endResponse();
@@ -1033,7 +1079,7 @@ public class CaldavConnection extends AbstractConnection {
         response.startResponse(encodePath(request, "/principals/" + prefix + '/' + principal));
         response.startPropstat();
 
-        if (request.hasProperty("principal-URL") && request.isIcal5()) {
+        if (request.hasProperty("principal-URL")) {
             response.appendHrefProperty("D:principal-URL", encodePath(request, "/principals/" + prefix + '/' + actualPrincipal));
         }
 
@@ -1144,19 +1190,19 @@ public class CaldavConnection extends AbstractConnection {
             response.startRecipientResponse(attendee);
 
             StringBuilder ics = new StringBuilder();
-            ics.append("BEGIN:VCALENDAR").append((char) 13).append((char) 10)
-                    .append("VERSION:2.0").append((char) 13).append((char) 10)
-                    .append("PRODID:-//davmail.sf.net/NONSGML DavMail Calendar V1.1//EN").append((char) 13).append((char) 10)
-                    .append("METHOD:REPLY").append((char) 13).append((char) 10)
-                    .append("BEGIN:VFREEBUSY").append((char) 13).append((char) 10)
-                    .append("DTSTAMP:").append(valueMap.get("DTSTAMP")).append((char) 13).append((char) 10)
-                    .append("ORGANIZER:").append(valueMap.get("ORGANIZER")).append((char) 13).append((char) 10)
-                    .append("DTSTART:").append(valueMap.get("DTSTART")).append((char) 13).append((char) 10)
-                    .append("DTEND:").append(valueMap.get("DTEND")).append((char) 13).append((char) 10)
-                    .append("UID:").append(valueMap.get("UID")).append((char) 13).append((char) 10)
-                    .append(attendeeKeyMap.get(attendee)).append(':').append(attendee).append((char) 13).append((char) 10);
+            ics.append("BEGIN:VCALENDAR\r\n")
+                    .append("VERSION:2.0\r\n")
+                    .append("PRODID:-//davmail.sf.net/NONSGML DavMail Calendar V1.1//EN\r\n")
+                    .append("METHOD:REPLY\r\n")
+                    .append("BEGIN:VFREEBUSY\r\n")
+                    .append("DTSTAMP:").append(valueMap.get("DTSTAMP")).append("\r\n")
+                    .append("ORGANIZER:").append(valueMap.get("ORGANIZER")).append("\r\n")
+                    .append("DTSTART:").append(valueMap.get("DTSTART")).append("\r\n")
+                    .append("DTEND:").append(valueMap.get("DTEND")).append("\r\n")
+                    .append("UID:").append(valueMap.get("UID")).append("\r\n")
+                    .append(attendeeKeyMap.get(attendee)).append(':').append(attendee).append("\r\n");
             entry.getValue().appendTo(ics);
-            ics.append("END:VFREEBUSY").append((char) 13).append((char) 10)
+            ics.append("END:VFREEBUSY\r\n")
                     .append("END:VCALENDAR");
             response.appendCalendarData(ics.toString());
             response.endRecipientResponse();
@@ -1200,7 +1246,7 @@ public class CaldavConnection extends AbstractConnection {
      */
     public void sendNotFound(CaldavRequest request) throws IOException {
         BundleMessage message = new BundleMessage("LOG_UNSUPPORTED_REQUEST", request);
-        DavGatewayTray.warn(message);
+        DavGatewayTray.debug(message);
         sendErr(HttpStatus.SC_NOT_FOUND, message.format());
     }
 
@@ -1303,8 +1349,7 @@ public class CaldavConnection extends AbstractConnection {
             sendClient("Server: DavMail Gateway " + DavGateway.getCurrentVersion());
             String scheduleMode;
             // enable automatic scheduling over EWS, can be disabled
-            if (Settings.getBooleanProperty("davmail.caldavAutoSchedule", true)
-                    && !(session instanceof DavExchangeSession)) {
+            if (!(session instanceof DavExchangeSession)) {
                 scheduleMode = "calendar-auto-schedule";
             } else {
                 scheduleMode = "calendar-schedule";
@@ -1388,7 +1433,7 @@ public class CaldavConnection extends AbstractConnection {
 
         protected CaldavRequest(String command, String path, Map<String, String> headers, String body) throws IOException {
             this.command = command;
-            this.path = path.replaceAll("//", "/");
+            this.path = path.replace("//", "/");
             pathElements = this.path.split("/");
             this.headers = headers;
             buildDepth();
@@ -1709,13 +1754,13 @@ public class CaldavConnection extends AbstractConnection {
                  * it'll fail.
                  */
                 String result = calendarPath.toString();
-                // replace unsupported spaces
-                if (result.indexOf(' ') >= 0) {
-                    result = result.replaceAll("___", " ");
+                // replace ___ encoding with spaces
+                if (result.contains("___")) {
+                    result = result.replace("___", " ");
                 }
                 // replace /addressbook suffix on public folders
                 if (result.startsWith("/public")) {
-                    result = result.replaceAll("/addressbook", "");
+                    result = result.replace("/addressbook", "");
                 }
 
                 return result;

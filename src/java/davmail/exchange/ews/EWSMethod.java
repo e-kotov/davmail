@@ -110,6 +110,7 @@ public abstract class EWSMethod extends HttpPost implements ResponseHandler<EWSM
     protected String serverVersion;
     protected String timezoneContext;
     private HttpResponse response;
+    private boolean enableNullFiltering;
 
     /**
      * Build EWS method
@@ -195,6 +196,10 @@ public abstract class EWSMethod extends HttpPost implements ResponseHandler<EWSM
 
         httpEntity.setContentType(CONTENT_TYPE);
         setEntity(httpEntity);
+    }
+
+    protected void enableNullFiltering(boolean enableNullFiltering) {
+        this.enableNullFiltering = enableNullFiltering;
     }
 
     protected void addAdditionalProperty(FieldURI additionalProperty) {
@@ -549,6 +554,10 @@ public abstract class EWSMethod extends HttpPost implements ResponseHandler<EWSM
          * attendee fullname
          */
         public String name;
+        /**
+         * attendee calendar user type (ROOM, RESOURCE)
+         */
+        public String cutype;
     }
 
     /**
@@ -806,6 +815,9 @@ public abstract class EWSMethod extends HttpPost implements ResponseHandler<EWSM
                     && !"ErrorItemNotFound".equals(errorDetail)
                     && !"ErrorCalendarOccurrenceIsDeletedFromRecurrence".equals(errorDetail)
             )) {
+                if (errorDetail.startsWith("Unexpected EOF in prolog")) {
+                    throw new EWSException("EWS not available");
+                }
                 throw new EWSException(errorDetail
                         + ' ' + ((errorDescription != null) ? errorDescription : "")
                         + ' ' + ((errorValue != null) ? errorValue : "")
@@ -953,10 +965,12 @@ public abstract class EWSMethod extends HttpPost implements ResponseHandler<EWSM
                     responseItem.attachments = handleAttachments(reader);
                 } else if ("EmailAddresses".equals(tagLocalName)) {
                     handleEmailAddresses(reader, responseItem);
-                } else if ("RequiredAttendees".equals(tagLocalName) || "OptionalAttendees".equals(tagLocalName)) {
+                } else if ("RequiredAttendees".equals(tagLocalName) || "OptionalAttendees".equals(tagLocalName) || "Resources".equals(tagLocalName)) {
                     handleAttendees(reader, responseItem, tagLocalName);
                 } else if ("ModifiedOccurrences".equals(tagLocalName)) {
                     handleModifiedOccurrences(reader, responseItem);
+                } else if ("StartTimeZone".equals(tagLocalName)) {
+                    responseItem.put(tagLocalName, getAttributeValue(reader, "Id"));
                 } else {
                     if (tagLocalName.endsWith("Id")) {
                         value = getAttributeValue(reader, "Id");
@@ -1078,6 +1092,9 @@ public abstract class EWSMethod extends HttpPost implements ResponseHandler<EWSM
         Attendee attendee = new Attendee();
         if ("RequiredAttendees".equals(attendeeType)) {
             attendee.role = "REQ-PARTICIPANT";
+        } else if ("Resources".equals(attendeeType)) {
+            attendee.role = "NON-PARTICIPANT";
+            attendee.cutype = "ROOM"; // make default CUTYPE room
         } else {
             attendee.role = "OPT-PARTICIPANT";
         }
@@ -1228,7 +1245,66 @@ public abstract class EWSMethod extends HttpPost implements ResponseHandler<EWSM
         return this;
     }
 
-    protected void processResponseStream(InputStream inputStream) {
+    /**
+     * Check if byte array contains the ASCII sequence {@code &#x0} or {@code &#0}
+     *
+     * @param bytes response bytes
+     * @return true if null character reference pattern is detected
+     */
+    static boolean hasNullCharacterReference(byte[] bytes) {
+        // scan for &#x0 or &#0 byte patterns
+        for (int i = 0; i < bytes.length - 3; i++) {
+            if (bytes[i] == '&' && bytes[i + 1] == '#') {
+                if (bytes[i + 2] == 'x' && i + 3 < bytes.length && bytes[i + 3] == '0') {
+                    return true;
+                }
+                if (bytes[i + 2] == '0') {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Filter null character references ({@code &#x0;}, {@code &#x00;}, {@code &#0;}, {@code &#00;}, etc.)
+     * from XML response bytes. These are illegal in XML 1.0 and 1.1 but Exchange may return them
+     * in property values such as StartTimeZone Id when timezone names contain null-padded WCHAR arrays
+     * (e.g. from ActiveSync/TbSync clients).
+     * <p>
+     * Returns the original byte array unchanged if no null character references are found.
+     *
+     * @param responseBytes raw XML response bytes
+     * @return filtered bytes with null character references removed, or original array if clean
+     */
+    static byte[] filterNullCharacterReferences(byte[] responseBytes) {
+        if (responseBytes == null || responseBytes.length == 0 || !hasNullCharacterReference(responseBytes)) {
+            return responseBytes;
+        }
+        LOGGER.warn("Stripping null character references from EWS response");
+        String xml = new String(responseBytes, StandardCharsets.UTF_8);
+        xml = xml.replaceAll("&#x0+;", "").replaceAll("&#0+;", "");
+        return xml.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Read all bytes from input stream.
+     *
+     * @param inputStream input stream to read
+     * @return byte array with all content
+     * @throws IOException on error
+     */
+    private static byte[] readAllBytes(InputStream inputStream) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        int count;
+        while ((count = inputStream.read(chunk)) != -1) {
+            buffer.write(chunk, 0, count);
+        }
+        return buffer.toByteArray();
+    }
+
+    protected void processResponseStream(InputStream inputStream) throws IOException {
         responseItems = new ArrayList<>();
         XMLStreamReader reader = null;
         try {
@@ -1251,7 +1327,13 @@ public abstract class EWSMethod extends HttpPost implements ResponseHandler<EWSM
                     return count;
                 }
             };
-            reader = XMLStreamUtil.createXMLStreamReader(inputStream);
+            if (enableNullFiltering) {
+                // workaround for invalid &#x0; and &#0; null character references in timezone name
+                byte[] responseBytes = filterNullCharacterReferences(readAllBytes(inputStream));
+                reader = XMLStreamUtil.createXMLStreamReader(new ByteArrayInputStream(responseBytes));
+            } else {
+                reader = XMLStreamUtil.createXMLStreamReader(inputStream);
+            }
             while (reader.hasNext()) {
                 reader.next();
                 handleErrors(reader);
