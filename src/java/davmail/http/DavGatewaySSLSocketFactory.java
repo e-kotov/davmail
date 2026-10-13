@@ -118,10 +118,16 @@ public class DavGatewaySSLSocketFactory extends SSLSocketFactory {
         }
 
         ManagerFactoryParameters keyStoreBuilderParameters = new KeyStoreBuilderParameters(keyStoreBuilders);
-        keyManagerFactory.init(keyStoreBuilderParameters);
-
-        // Get a list of key managers
-        KeyManager[] keyManagers = keyManagerFactory.getKeyManagers();
+        KeyManager[] keyManagers;
+        try {
+            keyManagerFactory.init(keyStoreBuilderParameters);
+            // Get a list of key managers
+            keyManagers = keyManagerFactory.getKeyManagers();
+        } catch (InvalidAlgorithmParameterException e) {
+            // Android key managers reject KeyStoreBuilderParameters: continue without client certificates
+            LOGGER.debug("Client certificates unavailable: " + e.getMessage());
+            keyManagers = new KeyManager[0];
+        }
 
         // Walk through the key managers and replace all X509 Key Managers with
         // a specialized wrapped DavMail X509 Key Manager

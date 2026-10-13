@@ -13,6 +13,10 @@ mirrors upstream. Each release's notes name the upstream commit it is built on.
   calendar home set so CalDAV clients discover it, and is treated as a shared folder: hard
   delete, no meeting mail sent from your mailbox, private events excluded.
   EWS folder ids can be read with any EWS client, for example `exchangelib`.
+- **Android TLS client.** Android's key managers reject `KeyStoreBuilderParameters`, so
+  `DavGatewaySSLSocketFactory` falls back to no client certificates there instead of failing
+  every HTTPS connection. Desktop JVMs take the unchanged path. Used by
+  [e-kotov/davmail-android](https://github.com/e-kotov/davmail-android).
 
 ## Releases
 
@@ -27,4 +31,5 @@ older release tags stay on the branch), then tag the next `X.Y.Z-ek.N`.
 History: `7.0.0-ek.1` was based on the upstream `7.0.0` tag. From `7.0.0-ek.2`, `ek` follows
 upstream `master`; `7.0.0-ek.2` is on `d452b6d8`, which adds the macOS 27 Calendar fix for
 mguessan/davmail#562 (`principal-URL` on the principal).
+`7.0.0-ek.3` adds the Android TLS client patch on the same upstream commit.
 Upstream's Docker image workflows are removed on this branch.
