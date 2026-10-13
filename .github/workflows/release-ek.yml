@@ -1,0 +1,52 @@
+name: release-ek
+
+on:
+  push:
+    tags: ['*-ek.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing X.Y.Z-ek.N tag to rebuild (replaces assets)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Ant
+        run: sudo apt-get update -q && sudo apt-get install -y -q ant
+      - name: Build
+        run: ant -Drelease="$TAG" prepare-dist
+      - name: Package platform-independent zip (same layout as upstream davmail-X.Y.Z.zip)
+        run: |
+          set -euo pipefail
+          out="davmail-$TAG.zip"
+          cp src/bin/davmail dist/davmail && chmod 755 dist/davmail
+          cp LICENSE FORK.md dist/
+          (cd dist && zip -q -X "../$out" davmail davmail.jar LICENSE FORK.md \
+            $(ls lib/*.jar | grep -Ev '^lib/(swt|junit-|hamcrest-core-|winrun4j-)'))
+          sha256sum "$out" > SHA256SUMS
+          unzip -l "$out" | tail -1
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="DavMail $TAG: upstream ${TAG%%-ek.*} plus the e-kotov/davmail patches listed in FORK.md."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "davmail-$TAG.zip" SHA256SUMS --clobber
+          else
+            gh release create "$TAG" "davmail-$TAG.zip" SHA256SUMS --verify-tag --title "DavMail $TAG" --notes "$notes"
+          fi
