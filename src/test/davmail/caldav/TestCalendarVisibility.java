@@ -217,12 +217,12 @@ public class TestCalendarVisibility extends TestCase {
         FakeSession() throws IOException { super((HttpClientAdapter) null, "me@example.org"); }
         @Override public void buildSessionInfo(URI uri) { email = "me@example.org"; }
         @Override public boolean isSharedFolder(String path) { return false; }
-        @Override public Folder getFolder(String path) {
+        @Override public ExchangeSession.Folder getFolder(String path) {
             folderReads++;
             return folder(path);
         }
-        private Folder folder(String path) {
-            Folder folder = new Folder();
+        private ExchangeSession.Folder folder(String path) {
+            ExchangeSession.Folder folder = new ExchangeSession.Folder();
             folder.folderPath = path;
             folder.displayName = path;
             folder.folderClass = path.endsWith("contacts") ? "IPF.Contact" : "IPF.Appointment";
@@ -230,7 +230,7 @@ public class TestCalendarVisibility extends TestCase {
             folder.etag = "test-etag";
             return folder;
         }
-        @Override public List<Folder> getSubCalendarFolders(String path, boolean recursive) {
+        @Override public List<ExchangeSession.Folder> getSubCalendarFolders(String path, boolean recursive) {
             return Arrays.asList(folder("calendar/ram_a"), folder("calendar/ram_b"));
         }
         @Override public ExchangeSession.Item getItem(String path, String name) throws IOException {
