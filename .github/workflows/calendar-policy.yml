@@ -1,0 +1,23 @@
+name: calendar-policy
+
+on:
+  push:
+    branches: [ek]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Ant
+        run: sudo apt-get update -q && sudo apt-get install -y -q ant
+      - name: Compile and test calendar visibility without Exchange credentials
+        run: ant test-calendar-visibility

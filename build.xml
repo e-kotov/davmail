@@ -182,6 +182,19 @@
         </copy>
     </target>
 
+    <target name="test-calendar-visibility" depends="test-compile">
+        <junit printsummary="on" haltonfailure="yes" fork="true">
+            <jvmarg value="-Djava.awt.headless=true"/>
+            <classpath>
+                <path refid="classpath"/>
+                <pathelement location="target/classes"/>
+                <pathelement location="target/test-classes"/>
+            </classpath>
+            <formatter type="brief" usefile="false"/>
+            <test name="davmail.caldav.TestCalendarVisibility"/>
+        </junit>
+    </target>
+
     <target name="test" depends="test-compile">
         <taskdef resource="org/jacoco/ant/antlib.xml">
             <classpath>

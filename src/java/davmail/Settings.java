@@ -531,6 +531,16 @@ public final class Settings {
      * @param property property name
      * @return property value
      */
+    /** Return a configured value without collapsing an explicit empty value to null. */
+    public static synchronized String getRawProperty(String property) {
+        return SETTINGS_PROPERTIES.getProperty(property);
+    }
+
+    /** Remove a setting, preserving the distinction between absent and explicitly empty. */
+    public static synchronized void removeProperty(String property) {
+        SETTINGS_PROPERTIES.remove(property);
+    }
+
     public static synchronized String getProperty(String property) {
         String value = SETTINGS_PROPERTIES.getProperty(property);
         // return null on empty value

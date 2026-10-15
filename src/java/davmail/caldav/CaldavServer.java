@@ -33,6 +33,8 @@ public class CaldavServer extends AbstractServer {
      */
     public static final int DEFAULT_PORT = 80;
 
+    private final CalendarVisibility calendarVisibility;
+
     /**
      * Create a ServerSocket to listen for connections.
      * Start the thread.
@@ -41,6 +43,7 @@ public class CaldavServer extends AbstractServer {
      */
     public CaldavServer(int port) {
         super(CaldavServer.class.getName(), port, CaldavServer.DEFAULT_PORT);
+        calendarVisibility = CalendarVisibility.fromSettings();
         nosslFlag = Settings.getBooleanProperty("davmail.ssl.nosecurecaldav");
     }
 
@@ -51,6 +54,6 @@ public class CaldavServer extends AbstractServer {
 
     @Override
     public AbstractConnection createConnectionHandler(Socket clientSocket) {
-        return new CaldavConnection(clientSocket);
+        return new CaldavConnection(clientSocket, calendarVisibility);
     }
 }

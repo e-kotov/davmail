@@ -28,7 +28,7 @@ jobs:
       - name: Install Ant
         run: sudo apt-get update -q && sudo apt-get install -y -q ant
       - name: Build
-        run: ant -Drelease="$TAG" prepare-dist
+        run: ant -Drelease="$TAG" prepare-dist test-calendar-visibility
       - name: Package platform-independent zip (same layout as upstream davmail-X.Y.Z.zip)
         run: |
           set -euo pipefail

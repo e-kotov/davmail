@@ -78,6 +78,8 @@ public class CaldavConnection extends AbstractConnection {
     protected static final int MAX_KEEP_ALIVE_TIME = 300;
     protected final Logger wireLogger = Logger.getLogger(this.getClass());
 
+    private final CalendarVisibility calendarVisibility;
+
     protected boolean closed;
 
     /**
@@ -104,7 +106,12 @@ public class CaldavConnection extends AbstractConnection {
      * @param clientSocket Caldav client socket
      */
     public CaldavConnection(Socket clientSocket) {
+        this(clientSocket, CalendarVisibility.fromSettings());
+    }
+
+    CaldavConnection(Socket clientSocket, CalendarVisibility calendarVisibility) {
         super(CaldavConnection.class.getSimpleName(), clientSocket, "UTF-8");
+        this.calendarVisibility = calendarVisibility;
         // set caldav logging to davmail logging level
         wireLogger.setLevel(Settings.getLoggingLevel("davmail"));
     }
@@ -292,19 +299,30 @@ public class CaldavConnection extends AbstractConnection {
         }
     }
 
-    // The calendar home remains a collection so clients can discover shared calendars.
+    // Keep the calendar home traversable even when its own events are hidden.
     protected boolean isHiddenDefaultCalendar(String folderPath) {
-        String ownCalendar = "/users/" + session.getEmail() + "/calendar";
-        return Settings.getBooleanProperty("davmail.hideDefaultCalendar", false)
-                && (ownCalendar.equalsIgnoreCase(folderPath)
-                || (ownCalendar + '/').equalsIgnoreCase(folderPath));
+        return CalendarVisibility.DEFAULT.equals(calendarVisibility.calendarName(folderPath, session.getEmail()))
+                && !calendarVisibility.isVisible(CalendarVisibility.DEFAULT);
+    }
+
+    private boolean isHiddenCalendar(String folderPath) {
+        String name = calendarVisibility.calendarName(folderPath, session.getEmail());
+        return name != null && !calendarVisibility.isVisible(name);
     }
 
     protected void handleFolderOrItem(CaldavRequest request) throws IOException {
-        if ((isHiddenDefaultCalendar(request.getFolderPath()) || isHiddenDefaultCalendar(request.path))
-                && !request.isPropFind()) {
+        boolean hidden = isHiddenCalendar(request.getFolderPath()) || isHiddenDefaultCalendar(request.path);
+        if (hidden && !(request.isPropFind() && isHiddenDefaultCalendar(request.path))) {
             sendNotFound(request);
             return;
+        }
+        if (request.isMove() && request.getHeader("destination") != null) {
+            String destination = URI.create(request.getHeader("destination")).getPath();
+            int slash = destination.lastIndexOf('/');
+            if (slash >= 0 && isHiddenCalendar(destination.substring(0, slash))) {
+                sendNotFound(request);
+                return;
+            }
         }
         String lastPath = StringUtil.xmlDecode(request.getLastPath());
         // folder requests
@@ -541,7 +559,11 @@ public class CaldavConnection extends AbstractConnection {
      */
     public void appendFolderOrItem(CaldavResponse response, CaldavRequest request, ExchangeSession.Folder folder, String subFolder,
                                    boolean nestedCalendar) throws IOException {
-        boolean hiddenCalendar = isHiddenDefaultCalendar(request.getFolderPath(subFolder));
+        String responsePath = request.getFolderPath(subFolder);
+        boolean hiddenCalendar = isHiddenDefaultCalendar(responsePath);
+        if (isHiddenCalendar(responsePath) && !hiddenCalendar) {
+            return;
+        }
         response.startResponse(encodePath(request, request.getPath(subFolder)));
         response.startPropstat();
 
@@ -764,6 +786,15 @@ public class CaldavConnection extends AbstractConnection {
                 }
                 if (!folderPath.startsWith("/public")) {
                     folderList = session.getSubCalendarFolders(folderPath, false);
+                    if (CalendarVisibility.DEFAULT.equals(calendarVisibility.calendarName(folderPath, session.getEmail()))) {
+                        List<String> names = new ArrayList<>();
+                        names.add(CalendarVisibility.DEFAULT);
+                        for (ExchangeSession.Folder child : folderList) {
+                            String childPath = request.getFolderPath(child.folderPath.substring(child.folderPath.indexOf('/') + 1));
+                            names.add(calendarVisibility.calendarName(childPath, session.getEmail()));
+                        }
+                        calendarVisibility.warnUnknownNames(names);
+                    }
                 }
             }
         }
@@ -801,6 +832,10 @@ public class CaldavConnection extends AbstractConnection {
         String folderPath = request.getFolderPath();
         if (displayname != null) {
             String targetPath = request.getParentFolderPath() + '/' + displayname;
+            if (isHiddenCalendar(targetPath)) {
+                sendNotFound(request);
+                return;
+            }
             if (!targetPath.equals(folderPath)) {
                 session.moveFolder(folderPath, targetPath);
             }
@@ -1008,13 +1043,13 @@ public class CaldavConnection extends AbstractConnection {
             response.startPropstat();
             if (request.hasProperty("resourcetype")) {
                 response.appendProperty("D:resourcetype", "<D:collection/>" +
-                        (Settings.getBooleanProperty("davmail.hideDefaultCalendar", false) ? "" :
+                        (!calendarVisibility.isVisible(CalendarVisibility.DEFAULT) ? "" :
                         "<C:calendar xmlns:C=\"urn:ietf:params:xml:ns:caldav\"/>"));
             }
             if (request.hasProperty("displayname")) {
                 response.appendProperty("D:displayname", session.getEmail());
             }
-            if (!Settings.getBooleanProperty("davmail.hideDefaultCalendar", false)
+            if (calendarVisibility.isVisible(CalendarVisibility.DEFAULT)
                     && request.hasProperty("supported-calendar-component-set")) {
                 response.appendProperty("C:supported-calendar-component-set", "<C:comp name=\"VEVENT\"/>");
             }
