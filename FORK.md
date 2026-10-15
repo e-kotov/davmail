@@ -18,6 +18,12 @@ mirrors upstream. Each release's notes name the upstream commit it is built on.
   every HTTPS connection. Desktop JVMs take the unchanged path. Used by
   [e-kotov/davmail-android](https://github.com/e-kotov/davmail-android).
 
+- **Hide the default calendar.** `davmail.hideDefaultCalendar=true` exposes the own
+  `/users/<email>/calendar/` as a plain collection containing shared/subcalendars.
+  It omits own events from discovery and rejects direct default-calendar operations.
+  Exchange data stays intact. Default: `false`. Refresh calendar discovery in clients
+  after changing the setting; cached calendars may need to be deselected or removed.
+
 ## Releases
 
 Tags are `X.Y.Z-ek.N`, where `X.Y.Z` is the upstream version in `build.xml` at the merged commit

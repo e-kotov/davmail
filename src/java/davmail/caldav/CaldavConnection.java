@@ -292,7 +292,20 @@ public class CaldavConnection extends AbstractConnection {
         }
     }
 
+    // The calendar home remains a collection so clients can discover shared calendars.
+    protected boolean isHiddenDefaultCalendar(String folderPath) {
+        String ownCalendar = "/users/" + session.getEmail() + "/calendar";
+        return Settings.getBooleanProperty("davmail.hideDefaultCalendar", false)
+                && (ownCalendar.equalsIgnoreCase(folderPath)
+                || (ownCalendar + '/').equalsIgnoreCase(folderPath));
+    }
+
     protected void handleFolderOrItem(CaldavRequest request) throws IOException {
+        if ((isHiddenDefaultCalendar(request.getFolderPath()) || isHiddenDefaultCalendar(request.path))
+                && !request.isPropFind()) {
+            sendNotFound(request);
+            return;
+        }
         String lastPath = StringUtil.xmlDecode(request.getLastPath());
         // folder requests
         if (request.isPropFind() && "inbox".equals(lastPath)) {
@@ -528,6 +541,7 @@ public class CaldavConnection extends AbstractConnection {
      */
     public void appendFolderOrItem(CaldavResponse response, CaldavRequest request, ExchangeSession.Folder folder, String subFolder,
                                    boolean nestedCalendar) throws IOException {
+        boolean hiddenCalendar = isHiddenDefaultCalendar(request.getFolderPath(subFolder));
         response.startResponse(encodePath(request, request.getPath(subFolder)));
         response.startPropstat();
 
@@ -535,7 +549,7 @@ public class CaldavConnection extends AbstractConnection {
             if (folder.isContact()) {
                 response.appendProperty("D:resourcetype", "<D:collection/>" +
                         "<E:addressbook/>");
-            } else if (folder.isCalendar() || folder.isTask()) {
+            } else if (!hiddenCalendar && (folder.isCalendar() || folder.isTask())) {
                 response.appendProperty("D:resourcetype", "<D:collection/>" + "<C:calendar/>");
             } else {
                 response.appendProperty("D:resourcetype", "<D:collection/>");
@@ -550,7 +564,7 @@ public class CaldavConnection extends AbstractConnection {
             }
         }
         if (request.hasProperty("getcontenttype")) {
-            if (nestedCalendar) {
+            if (nestedCalendar || hiddenCalendar) {
                 // clients listing calendar items must not mistake a sub calendar for an event
                 response.appendProperty("D:getcontenttype", "httpd/unix-directory");
             } else if (folder.isContact()) {
@@ -583,7 +597,7 @@ public class CaldavConnection extends AbstractConnection {
         if (request.hasProperty("calendar-description")) {
             response.appendProperty("C:calendar-description", "");
         }
-        if (request.hasProperty("supported-calendar-component-set")) {
+        if (!hiddenCalendar && request.hasProperty("supported-calendar-component-set")) {
             if (folder.isCalendar()) {
                 response.appendProperty("C:supported-calendar-component-set", "<C:comp name=\"VEVENT\"/><C:comp name=\"VTODO\"/>");
             } else if (folder.isTask()) {
@@ -745,7 +759,9 @@ public class CaldavConnection extends AbstractConnection {
             if (folder.isContact()) {
                 contacts = session.getAllContacts(folderPath, !isOldCardavClient(request) && !request.isLightning());
             } else if (folder.isCalendar() || folder.isTask()) {
-                events = session.getAllEvents(folderPath);
+                if (!isHiddenDefaultCalendar(folderPath)) {
+                    events = session.getAllEvents(folderPath);
+                }
                 if (!folderPath.startsWith("/public")) {
                     folderList = session.getSubCalendarFolders(folderPath, false);
                 }
@@ -759,7 +775,9 @@ public class CaldavConnection extends AbstractConnection {
             if (folder.isContact()) {
                 appendContactsResponses(response, request, contacts);
             } else if (folder.isCalendar() || folder.isTask()) {
-                appendEventsResponses(response, request, events);
+                if (events != null) {
+                    appendEventsResponses(response, request, events);
+                }
                 // Send sub folders for multi-calendar support under iCal, except for public folders
                 if (folderList != null) {
                     for (ExchangeSession.Folder subFolder : folderList) {
@@ -990,12 +1008,14 @@ public class CaldavConnection extends AbstractConnection {
             response.startPropstat();
             if (request.hasProperty("resourcetype")) {
                 response.appendProperty("D:resourcetype", "<D:collection/>" +
-                        "<C:calendar xmlns:C=\"urn:ietf:params:xml:ns:caldav\"/>");
+                        (Settings.getBooleanProperty("davmail.hideDefaultCalendar", false) ? "" :
+                        "<C:calendar xmlns:C=\"urn:ietf:params:xml:ns:caldav\"/>"));
             }
             if (request.hasProperty("displayname")) {
                 response.appendProperty("D:displayname", session.getEmail());
             }
-            if (request.hasProperty("supported-calendar-component-set")) {
+            if (!Settings.getBooleanProperty("davmail.hideDefaultCalendar", false)
+                    && request.hasProperty("supported-calendar-component-set")) {
                 response.appendProperty("C:supported-calendar-component-set", "<C:comp name=\"VEVENT\"/>");
             }
             response.endPropStatOK();
