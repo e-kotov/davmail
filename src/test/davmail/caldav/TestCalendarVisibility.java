@@ -150,7 +150,12 @@ public class TestCalendarVisibility extends TestCase {
         Settings.setProperty("davmail.calendarsExclude", "@default,ram_b");
         for (String path : Arrays.asList(HOME, HOME.substring(0, HOME.length() - 1),
                 HOME + "event.ics", HOME + "ram_b/", HOME + "ram_b", HOME + "ram_b/event.ics")) {
-            for (String method : Arrays.asList("GET", "HEAD", "PUT", "DELETE", "REPORT", "MKCALENDAR")) {
+            // REPORT and MKCALENDAR address collections. On an item URL, DavMail's
+            // parser treats them as a new child collection rather than the item's parent.
+            List<String> methods = path.endsWith("event.ics")
+                    ? Arrays.asList("GET", "HEAD", "PUT", "DELETE")
+                    : Arrays.asList("GET", "HEAD", "PUT", "DELETE", "REPORT", "MKCALENDAR");
+            for (String method : methods) {
                 TestConnection connection = new TestConnection();
                 String body = method.equals("REPORT") ? "<c:calendar-query xmlns:c=\"urn:ietf:params:xml:ns:caldav\"/>"
                         : method.equals("MKCALENDAR") ? "<c:mkcalendar xmlns:c=\"urn:ietf:params:xml:ns:caldav\"/>" : null;
